@@ -132,6 +132,15 @@ impl PtyProcess {
                     close(slave_fd)?;
                 }
 
+                // Do not allow child to inherit open file descriptors from parent
+                use nix::sys::resource;
+                let (fd_limit, _) = resource::getrlimit(resource::Resource::RLIMIT_NOFILE)?;
+                for fd in 3..fd_limit {
+                    if let Ok(fd) = fd.try_into() {
+                        let _ = close(fd);
+                    }
+                }
+
                 // set echo off
                 let stdin = io::stdin();
                 let mut flags = termios::tcgetattr(&stdin)?;
