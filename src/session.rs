@@ -5,8 +5,8 @@ use crate::process::PtyProcess;
 use crate::reader::{NBReader, Regex};
 pub use crate::reader::{Options, ReadUntil};
 use std::fs::File;
-use std::io::prelude::*;
 use std::io::LineWriter;
+use std::io::{prelude::*, BufWriter};
 use std::ops::{Deref, DerefMut};
 use std::process::Command;
 use tempfile;
@@ -14,11 +14,32 @@ use tempfile;
 pub struct StreamSession<W: Write> {
     pub writer: LineWriter<W>,
     pub reader: NBReader,
+
+    write_log: Option<(BufWriter<File>, bool)>,
+}
+
+macro_rules! log_write {
+    ($self: ident, $item: tt, $escaper: path) => {
+        if let Some((log, escape)) = &mut $self.write_log {
+            if *escape {
+                write!(log, "{}", $escaper($item))?;
+            } else {
+                write!(log, "{}", $item)?;
+            }
+
+            log.flush()?;
+        }
+    };
 }
 
 impl<W: Write> StreamSession<W> {
-    pub fn new<R: Read + Send + 'static>(reader: R, writer: W, options: Options) -> Self {
+    pub fn new<R: Read + Send + 'static>(reader: R, writer: W, mut options: Options) -> Self {
         Self {
+            write_log: options
+                .logfile
+                .write
+                .take()
+                .map(|f| (BufWriter::new(f), options.logfile.escape)),
             writer: LineWriter::new(writer),
             reader: NBReader::new(reader, options),
         }
@@ -30,7 +51,8 @@ impl<W: Write> StreamSession<W> {
     /// returns number of written bytes
     pub fn send_line(&mut self, line: &str) -> Result<usize, Error> {
         let mut len = self.send(line)?;
-        len += self.writer.write(&[b'\n'])?;
+        len += self.writer.write(b"\n")?;
+        log_write!(self, "\n", str::escape_default);
         Ok(len)
     }
 
@@ -39,7 +61,9 @@ impl<W: Write> StreamSession<W> {
     ///
     /// Returns number of written bytes
     pub fn send(&mut self, s: &str) -> Result<usize, Error> {
-        self.writer.write(s.as_bytes()).map_err(Error::from)
+        let n = self.writer.write(s.as_bytes()).map_err(Error::from)?;
+        log_write!(self, s, str::escape_default);
+        Ok(n)
     }
 
     /// Send a control code to the running process and consume resulting output line
@@ -60,6 +84,9 @@ impl<W: Write> StreamSession<W> {
         self.writer.write_all(&[code])?;
         // stdout is line buffered, so needs a flush
         self.writer.flush()?;
+
+        log_write!(self, code, std::ascii::escape_default);
+
         Ok(())
     }
 
@@ -237,6 +264,7 @@ pub fn spawn_command(command: Command, timeout_ms: Option<u64>) -> Result<PtySes
         Options {
             timeout_ms,
             strip_ansi_escape_codes: false,
+            logfile: Default::default(),
         },
     )
 }
@@ -442,6 +470,7 @@ pub fn spawn_stream<R: Read + Send + 'static, W: Write>(
         Options {
             timeout_ms,
             strip_ansi_escape_codes: false,
+            logfile: Default::default(),
         },
     )
 }

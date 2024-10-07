@@ -2,8 +2,10 @@
 
 use crate::error::Error;
 pub use regex::Regex;
-use std::io::prelude::*;
+use std::fmt::Display;
+use std::fs::File;
 use std::io::{self, BufReader};
+use std::io::{prelude::*, BufWriter};
 use std::sync::mpsc::{channel, Receiver};
 use std::{fmt, time};
 use std::{result, thread};
@@ -108,6 +110,14 @@ pub fn find(needle: &ReadUntil, buffer: &str, eof: bool) -> Option<(usize, usize
 pub struct Options {
     pub timeout_ms: Option<u64>,
     pub strip_ansi_escape_codes: bool,
+    pub logfile: Logfile,
+}
+
+#[derive(Default, Debug)]
+pub struct Logfile {
+    pub read: Option<File>,
+    pub write: Option<File>,
+    pub escape: bool,
 }
 
 /// Non blocking reader
@@ -120,6 +130,7 @@ pub struct NBReader {
     buffer: String,
     eof: bool,
     timeout: Option<time::Duration>,
+    read_log: Option<(BufWriter<File>, bool)>,
 }
 
 impl NBReader {
@@ -174,6 +185,10 @@ impl NBReader {
             buffer: String::with_capacity(1024),
             eof: false,
             timeout: options.timeout_ms.map(time::Duration::from_millis),
+            read_log: options
+                .logfile
+                .read
+                .map(|f| (BufWriter::new(f), options.logfile.escape)),
         }
     }
 
@@ -184,7 +199,17 @@ impl NBReader {
         }
         while let Ok(from_channel) = self.reader.try_recv() {
             match from_channel {
-                Ok(PipedChar::Char(c)) => self.buffer.push(c as char),
+                Ok(PipedChar::Char(c)) => {
+                    self.buffer.push(c as char);
+
+                    if let Some((log, escape)) = &mut self.read_log {
+                        if *escape {
+                            write!(log, "{}", std::ascii::escape_default(c))?;
+                        } else {
+                            write!(log, "{}", c as char)?;
+                        }
+                    }
+                }
                 Ok(PipedChar::EOF) => self.eof = true,
                 // this is just from experience, e.g. "sleep 5" returns the other error which
                 // most probably means that there is no stdout stream at all -> send EOF
@@ -195,6 +220,9 @@ impl NBReader {
                     self.eof = err.raw_os_error() == Some(5)
                 }
             }
+        }
+        if let Some((log, _)) = &mut self.read_log {
+            log.flush()?;
         }
         Ok(())
     }
@@ -413,6 +441,7 @@ mod tests {
             Options {
                 timeout_ms: None,
                 strip_ansi_escape_codes: true,
+                logfile: Default::default(),
             },
         );
         let bytes = r
@@ -430,6 +459,7 @@ mod tests {
             Options {
                 timeout_ms: None,
                 strip_ansi_escape_codes: true,
+                logfile: Default::default(),
             },
         );
         let bytes = r
